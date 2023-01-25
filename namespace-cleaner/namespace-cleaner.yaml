@@ -1,0 +1,80 @@
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: namespace-cleaner
+  namespace: infra
+spec:
+  schedule: "33 3 * * *"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: namespace-cleaner-service-account
+          containers:
+            - image: registry.test.int/namespace-cleaner:latest
+              imagePullPolicy: Always
+              name: namespace-cleaner
+              resources:
+                requests:
+                  cpu: 25m
+                  memory: 32Mi
+                limits:
+                  cpu: 25m
+                  memory: 32Mi
+              env:
+                - name: NAMESPACE
+                  value: "demo-project"
+                - name: DEPLOYMENT_SUBSTR
+                  value: "project-back-"
+                - name: GITLAB_API_URL
+                  value: "https://project.gitlab.yandexcloud.net/api/v4"
+                - name: GITLAB_PROJECT_ID
+                  value: "31"
+                - name: GITLAB_TOKEN
+                  value: "$GITLAB_TOKEN"
+                - name: DEBUG
+                  value: "1"
+                - name: DB_IP
+                  value: "10.10.0.102"
+                - name: DB_USER
+                  value: "postgres"
+                - name: DB_PORT
+                  value: "5432"
+                - name: DB_PASSWORD
+                  value: "$DB_PASSWORD"
+                - name: DEPLOYMENT_EXPIRATION_HOURS
+                  value: "168"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: namespace-cleaner-service-account
+  namespace: infra
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: namespace-cleaner-role
+  namespace: demo-project
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: namespace-cleaner-rolebinding
+  namespace: demo-project
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: namespace-cleaner-role
+subjects:
+  - namespace: infra
+    kind: ServiceAccount
+    name: namespace-cleaner-service-account
