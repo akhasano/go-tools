@@ -75,7 +75,6 @@ func isSecretInVaultExists(path2secret string, secretName string) bool {
 	if tmpSecret.Value() == nil {
 		return false
 	}
-	//fmt.Println(tmpSecret)
 	return true
 }
 
