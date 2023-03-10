@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -78,43 +79,42 @@ func isSecretInVaultExists(path2secret string, secretName string) bool {
 	return true
 }
 
-func enumVaultSecretsForManifestExists(fileName string) bool {
-	type RemoteRef struct {
-		Key      string `yaml:"key"`
-		Property string `yaml:"property"`
-	}
-
-	type SecretKey struct {
-		SecretKey string    `yaml:"secretKey"`
-		RemoteRef RemoteRef `yaml:"remoteRef"`
-	}
-
-	type Spec struct {
-		RefreshInterval string      `yaml:"refreshInterval"`
-		Data            []SecretKey `yaml:"data"`
-	}
-
+func enumVaultSecretsForManifestExists(fileName string) {
 	type Manifest struct {
-		Spec Spec `yaml:"spec"`
+		Spec struct {
+			RefreshInterval string `yaml:"refreshInterval"`
+			Data            []struct {
+				SecretKey string `yaml:"secretKey"`
+				RemoteRef struct {
+					Key      string `yaml:"key"`
+					Property string `yaml:"property"`
+				} `yaml:"remoteRef"`
+			} `yaml:"data"`
+		} `yaml:"spec"`
 	}
-
-	var manifest Manifest
 
 	fl, err := ioutil.ReadFile(fileName)
 	checkError(err)
-	err = yaml.Unmarshal(fl, &manifest)
-	checkError(err)
 
-	for _, v := range manifest.Spec.Data {
-		debugOutput("---> Проверяем наличие секрета: " + v.RemoteRef.Property + " путь в Vault: " + v.RemoteRef.Key)
-		if !isSecretInVaultExists(v.RemoteRef.Key, v.RemoteRef.Property) {
-			debugOutput("---- [Fail!] ---> Секрет " + v.RemoteRef.Property + " в ветке " + v.RemoteRef.Key + " не найден !!! <===")
-			log.Fatal(">>>> Проверьте корректность секрета! Возможно опечатка. Аварийно завершаем пайплайн. <<<<<")
-		} else {
-			debugOutput("---- [Ok!] ---> Секрет " + v.RemoteRef.Key + "/" + v.RemoteRef.Property + " найден в хранилище")
+	dec := yaml.NewDecoder(bytes.NewReader(fl))
+
+	for {
+		var manifest Manifest
+		if dec.Decode(&manifest) != nil {
+			break
+		}
+		for _, v := range manifest.Spec.Data {
+			debugOutput("---> Проверяем наличие секрета: " + v.RemoteRef.Property + " путь в Vault: " + v.RemoteRef.Key)
+			if !isSecretInVaultExists(v.RemoteRef.Key, v.RemoteRef.Property) {
+				debugOutput("!!! [Fail!] ---> Секрет " + v.RemoteRef.Property + " в ветке " + v.RemoteRef.Key + " не найден. !!!")
+				debugOutput(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>><<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
+				log.Fatal(">>>>         Проверьте корректность секрета! Возможно опечатка. Аварийно завершаем пайплайн.        <<<<<")
+				debugOutput(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>><<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
+			} else {
+				debugOutput("---- [Ok!] ---> Секрет " + v.RemoteRef.Key + "/" + v.RemoteRef.Property + " найден в хранилище")
+			}
 		}
 	}
-	return true
 }
 
 func main() {
