@@ -1,21 +1,22 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"time"
 )
-
-const TableName = "k8s_events.events"
 
 type Event struct {
 	Eventmeta struct {
@@ -29,11 +30,13 @@ type Event struct {
 }
 
 type DBConn struct {
-	DB_HOST, DB_NAME, DB_PORT, DB_USER, DB_PASS, CACERT string
-	BATCH                                               int
-	certpool                                            *x509.CertPool
-	conn                                                *http.Client
-	Events                                              []Event
+	DB_HOST, DB_NAME, DB_PORT string
+	DB_USER, DB_PASS, CACERT  string
+	DB_TABLE                  string
+	BATCH                     int
+	certpool                  *x509.CertPool
+	conn                      *http.Client
+	Events                    []Event
 }
 
 func (dbconn *DBConn) Connect() {
@@ -56,6 +59,7 @@ func (dbconn *DBConn) SetVariables() {
 	dbconn.DB_HOST = getVariable("DB_HOST", true)
 	dbconn.DB_PORT = getVariable("DB_PORT", true)
 	dbconn.DB_NAME = getVariable("DB_NAME", true)
+	dbconn.DB_TABLE = getVariable("DB_TABLE", true)
 	dbconn.DB_USER = getVariable("DB_USER", true)
 	dbconn.DB_PASS = getVariable("DB_PASS", true)
 	dbconn.CACERT = getVariable("CACERT", true)
@@ -67,12 +71,33 @@ func (dbconn *DBConn) handler(w http.ResponseWriter, r *http.Request) {
 	event := Event{}
 	err := json.Unmarshal(b, &event)
 	checkError(err)
+	// log.Printf("В слайсе %v элемент(а/ов)\n", len(dbconn.Events)+1)
 	dbconn.Events = append(dbconn.Events, event)
 	if len(dbconn.Events) >= dbconn.BATCH {
 		log.Println("Отправляем накопленные данные в количестве " + strconv.Itoa(dbconn.BATCH) + " событий в БД и очищаем структуру")
 		dbconn.SendDataToClickHouseDB()
 		dbconn.Events = nil
 	}
+}
+
+func (dbconn *DBConn) about_handler(w http.ResponseWriter, r *http.Request) {
+	log.Println("Запросили корневой URL. Отображаем статистику ")
+	fmt.Fprintf(w, `Описание:
+
+Поднят endpoint /webhook - который ожидает вывода с kubewatch
+Переменные окружения:
+
+DB_HOST=`+dbconn.DB_HOST+`
+DB_PORT=`+dbconn.DB_PORT+`
+DB_NAME=`+dbconn.DB_NAME+`
+DB_TABLE=`+dbconn.DB_TABLE+`
+DB_USER=`+dbconn.DB_USER+`
+DB_PASS=[masked]
+CACERT=YandexRootCA
+BATCH=`+strconv.Itoa(dbconn.BATCH)+`
+
+`)
+
 }
 
 func (dbconn *DBConn) PrepareEventsAsString() string {
@@ -103,7 +128,7 @@ func (dbconn *DBConn) SendHTTPRequest(m string, q string) string {
 
 func (dbconn *DBConn) IsTableExist() bool {
 	log.Println("Проверяю существует ли таблица")
-	data := dbconn.SendHTTPRequest("GET", "Exists table "+TableName)
+	data := dbconn.SendHTTPRequest("GET", "Exists table "+dbconn.DB_NAME+"."+dbconn.DB_TABLE)
 	ret, err := strconv.Atoi(strings.Trim(string(data), "\n"))
 	checkError(err)
 	if ret == 0 {
@@ -117,7 +142,7 @@ func (dbconn *DBConn) IsTableExist() bool {
 
 func (dbconn *DBConn) CreateTable() {
 	log.Println("Пробую создать")
-	_ = dbconn.SendHTTPRequest("POST", "CREATE TABLE k8s_events.events (`kind` String, `name` String, `namespace` String, `reason` String, `text` String, `time` Int64) ENGINE = Log;")
+	_ = dbconn.SendHTTPRequest("POST", "CREATE TABLE "+dbconn.DB_NAME+"."+dbconn.DB_TABLE+" (`kind` String, `name` String, `namespace` String, `reason` String, `text` String, `time` Int64) ENGINE = Log;")
 	log.Println("Таблица создана")
 }
 
@@ -149,6 +174,30 @@ func main() {
 	if !dbconn.IsTableExist() {
 		dbconn.CreateTable()
 	}
+	httpServer := &http.Server{
+		Addr:           ":8000",
+		ReadTimeout:    10 * time.Second,
+		WriteTimeout:   10 * time.Second,
+		MaxHeaderBytes: 1 << 20,
+	}
 	http.HandleFunc("/webhook", dbconn.handler)
-	log.Fatal(http.ListenAndServe("0.0.0.0:8000", nil))
+	http.HandleFunc("/", dbconn.about_handler)
+	go func() {
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal(err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt)
+	<-quit
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	log.Println("Получен сигнал на прерывание отправляем накопленные данные")
+	dbconn.SendDataToClickHouseDB()
+	log.Println("Завершаем работу")
+	if err := httpServer.Shutdown(ctx); err != nil {
+
+		log.Fatal(err)
+	}
 }
